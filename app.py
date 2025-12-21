@@ -37,8 +37,34 @@ LISTA_KATEGORII = [
 
 # --- FUNKCJE POMOCNICZE (ZAMIAST SQL) ---
 
+# --- FUNKCJA DO NAPRAWY LICZB (PANCERNA) ---
+def wyczysc_kwote(wartosc):
+    """Zamienia dowolny dziwny format (1 200,00 PLN) na czysty float (1200.0)."""
+    if pd.isna(wartosc) or wartosc == "":
+        return 0.0
+    
+    # Jeśli to już jest liczba, zwracamy jako float
+    if isinstance(wartosc, (int, float)):
+        return float(wartosc)
+    
+    # Konwersja na tekst
+    s = str(wartosc)
+    
+    # 1. Usuwamy waluty i śmieci tekstowe
+    s = s.replace(" PLN", "").replace(" zł", "").replace("PLN", "")
+    
+    # 2. Usuwamy spacje (zwykłe i tzw. twarde spacje bankowe \xa0)
+    s = s.replace(" ", "").replace("\xa0", "")
+    
+    # 3. Zamieniamy przecinek na kropkę (kluczowy moment!)
+    s = s.replace(",", ".")
+    
+    try:
+        return float(s)
+    except ValueError:
+        return 0.0
+
 def pobierz_dane():
-    """Pobiera dane z Google Sheets i formatuje je do DataFrame."""
     try:
         client = get_gspread_client()
         sh = client.open_by_url(SPREADSHEET_URL)
@@ -47,21 +73,17 @@ def pobierz_dane():
         data = worksheet.get_all_records()
         df = pd.DataFrame(data)
         
-        # Jeśli arkusz jest pusty, zwracamy pusty DataFrame z odpowiednimi kolumnami
         if df.empty:
             return pd.DataFrame(columns=['id', 'data', 'kategoria', 'opis', 'kwota'])
 
-        # Standaryzacja nazw kolumn (małe litery)
         df.columns = df.columns.str.lower().str.strip()
-        
-        # Konwersja typów (BARDZO WAŻNE W SHEETS)
         df['data'] = pd.to_datetime(df['data'], errors='coerce')
         
-        # Czyszczenie kwoty (jeśli przyszła jako tekst z "PLN" lub przecinkiem)
-        if df['kwota'].dtype == 'object':
-            df['kwota'] = df['kwota'].astype(str).str.replace('PLN', '').str.replace(',', '.').str.replace(' ', '')
+        # --- UŻYCIE NOWEJ FUNKCJI ---
+        # To naprawi liczby, które Google Sheets mógł zapisać w dziwnym formacie
+        df['kwota'] = df['kwota'].apply(wyczysc_kwote)
+        # ----------------------------
         
-        df['kwota'] = pd.to_numeric(df['kwota'], errors='coerce').fillna(0.0)
         df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
         
         return df
@@ -136,7 +158,7 @@ def przetworz_csv(uploaded_file):
         dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
         
         # Naprawa kwoty
-        dane['kwota'] = dane['kwota'].astype(str).str.replace(" PLN", "").str.replace(",", ".").str.replace(" ", "").astype(float)
+        dane['kwota'] = dane['kwota'].apply(wyczysc_kwote)
         
         if 'kategoria' not in dane.columns: dane['kategoria'] = "Bez kategorii"
         else: dane['kategoria'] = dane['kategoria'].fillna("Bez kategorii")
@@ -166,88 +188,12 @@ def przetworz_csv(uploaded_file):
         dane['kategoria'] = "Bez kategorii"
         dane["opis"] = "ING " + dane["opis"].fillna("")
         
-        dane['kwota'] = dane['kwota'].astype(str).str.replace(" PLN", "").str.replace(",", ".").str.replace(" ", "").astype(float)
+        dane['kwota'] = dane['kwota'].apply(wyczysc_kwote)
         dane['kwota'] = dane['kwota'] / 2
 
         return dane[['data', 'kategoria', 'opis', 'kwota']]
     
 
-# --- 🛠️ NARZĘDZIE DO MIGRACJI (POPRAWIONE) ---
-st.sidebar.markdown("---")
-st.sidebar.subheader("🔧 Migracja")
-
-with st.sidebar.expander("⚠️ Przenieś dane z SQLite"):
-    st.warning("Ta operacja NADPISZE wszystko w Google Sheets danymi ze starej bazy SQL.")
-    
-    if st.button("🚀 Uruchom migrację"):
-        import sqlite3
-        
-        try:
-            # 1. Połączenie ze starą bazą
-            # Upewnij się, że nazwa pliku to 'baza1.db' (lub taka jaką masz w folderze)
-            conn_sql = sqlite3.connect('baza1.db') 
-            
-            st.write("Wczytuję dane z SQL...")
-            df_old = pd.read_sql("SELECT * FROM dane", conn_sql)
-            conn_sql.close()
-            
-            if df_old.empty:
-                st.error("Stara baza jest pusta!")
-            else:
-                # 2. Normalizacja nazw kolumn (wszystko na małe litery)
-                df_old.columns = df_old.columns.str.lower().str.strip()
-                
-                # Mapowanie (jeśli w SQL kolumny nazywały się inaczej, np. po polsku z dużej litery)
-                # To zabezpieczenie, gdyby lower() nie wystarczyło
-                mapa_kolumn = {
-                    'data operacji': 'data',
-                    'data transakcji': 'data',
-                    'opis operacji': 'opis',
-                    'dane kontrahenta': 'opis',
-                    'kwota': 'kwota',
-                    'kwota transakcji': 'kwota'
-                }
-                df_old = df_old.rename(columns=mapa_kolumn)
-
-                # --- 🛠️ TU BYŁ BŁĄD: NAPRAWA DATY ---
-                # Musimy powiedzieć Pandasowi: "To są daty, a nie napisy"
-                # errors='coerce' zamieni błędne daty na NaT (Not a Time)
-                df_old['data'] = pd.to_datetime(df_old['data'], dayfirst=True, errors='coerce')
-                
-                # Usuwamy wiersze, gdzie data się nie udała (jest NaT)
-                df_old = df_old.dropna(subset=['data'])
-                # -------------------------------------
-
-                # Uzupełnienie brakujących kolumn
-                if 'id' not in df_old.columns:
-                    df_old['id'] = range(1, len(df_old) + 1)
-                
-                if 'kategoria' not in df_old.columns:
-                    df_old['kategoria'] = "Importowana"
-
-                # Wybieramy tylko te 5 kolumn, które pasują do Google Sheets
-                cols = ['id', 'data', 'kategoria', 'opis', 'kwota']
-                
-                # Filtrujemy dane (żeby nie wysłać śmieciowych kolumn)
-                # axis=1 dropna usuwa kolumny, których nie ma w liście cols, jeśli zrobimy reindex
-                df_to_migrate = df_old.reindex(columns=cols)
-                
-                # Upewnij się, że ID to liczby całkowite
-                df_to_migrate['id'] = df_to_migrate['id'].fillna(0).astype(int)
-                
-                st.write(f"Przygotowano {len(df_to_migrate)} wierszy. Wysyłam do Google...")
-                
-                # 3. WYSYŁKA
-                zapisz_calosc(df_to_migrate)
-                
-                st.success("✅ SUKCES! Dane przeniesione. Sprawdź Arkusz Google.")
-                st.rerun()
-                
-        except Exception as e:
-            st.error(f"Błąd migracji: {e}")
-            # Pokaż szczegóły błędu, żeby łatwiej naprawić
-            import traceback
-            st.text(traceback.format_exc())
 
 # ==========================================
 # GŁÓWNA LOGIKA APLIKACJI
@@ -360,15 +306,17 @@ if strona == "Tabela danych":
         st.metric("📉 Średni wydatek", f"{srednia:.2f} PLN")
     st.markdown("---")
 
-    # --- EDYTOR DANYCH ---
+    # --- EDYTOR TABELI STREAMLIT ---
     df_edited_result = st.data_editor(
         df_view,
-        column_order=["data", "kategoria", "opis", "kwota"], # ukrywamy ID, ale jest w danych
+        column_order=["data", "kategoria", "opis", "kwota"],
         num_rows="dynamic",
         use_container_width=True,
         key="editor_glowny",
         column_config={
-            "kwota": st.column_config.NumberColumn("Kwota", format="%.2f PLN", step=0.01),
+            # format="%.2f" usuwa mylące przecinki tysięcy. 
+            # Zamiast '1,200.50' zobaczysz '1200.50' -> CZYTELNIEJ
+            "kwota": st.column_config.NumberColumn("Kwota (PLN)", format="%.2f", step=0.01),
             "data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
             "kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
         }
