@@ -1,77 +1,148 @@
 import streamlit as st
 import pandas as pd
-import sqlite3
+import gspread
+from google.oauth2.service_account import Credentials
 import datetime
 
-st.set_page_config(page_title="Budżet", layout="wide")
+# --- KONFIGURACJA STRONY ---
+st.set_page_config(page_title="Budżet (Google Sheets)", layout="wide")
 
-# --- KROK 1: Stwórz Menu ---
-st.sidebar.title("Nawigacja")
+# --- KONFIGURACJA GSPREAD (POŁĄCZENIE) ---
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
+]
 
-strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Statystyki", "Dodaj ręcznie"])
+@st.cache_resource
+def get_gspread_client():
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
+    client = gspread.authorize(creds)
+    return client
 
+# --- ⚙️ USTAWIENIA ARKUSZA ---
+SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1GdbHX0mKbwyJhjmcG3jgtN9E8BJVSSunRYvfSLUjSIc/edit?usp=sharing"  # <--- WAŻNE: Wklej link!
+WORKSHEET_NAME = "dane"
 
-conn = sqlite3.connect('baza1.db')
-cursor = conn.cursor()
-cursor.execute("""
-            CREATE TABLE IF NOT EXISTS dane (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                data TEXT,
-                opis TEXT,
-                kategoria TEXT,
-                kwota REAL
-            )
-            """)
-conn.commit()
+# --- LISTA KATEGORII (Twoja) ---
+LISTA_KATEGORII = [
+    'Nieistotne', 'Wynagrodzenie', 'Wpływy', 'Elektronika', 'Wyjścia i wydarzenia',
+    'Żywność i chemia domowa', 'Przejazdy', 'Sport i hobby ', 'Wpływy - inne',
+    'Odzież i obuwie', 'Podróże i wyjazdy', 'ZaMieszkanie', 'Zdrowie i uroda',
+    'Regularne oszczędzanie', 'Serwis i części', 'Multimedia, książki i prasa',
+    'Wypłata gotówki', 'Opłaty i odsetki', 'Auto i transport - inne',
+    'Czynsz i wynajem', 'Paliwo', 'Akcesoria i wyposażenie ',
+    'Jedzenie poza domem', 'Prezenty i wsparcie', 'Bez kategorii'
+]
 
-# --- 1. FUNKCJA PRZETWARZAJĄCA CSV (Twoja logika) ---
-# --- 1. FUNKCJA PRZETWARZAJĄCA CSV (Z ODCIĘCIEM PUSTYCH WIERSZY) ---
+# --- FUNKCJE POMOCNICZE (ZAMIAST SQL) ---
+
+def pobierz_dane():
+    """Pobiera dane z Google Sheets i formatuje je do DataFrame."""
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_url(SPREADSHEET_URL)
+        worksheet = sh.worksheet(WORKSHEET_NAME)
+        
+        data = worksheet.get_all_records()
+        df = pd.DataFrame(data)
+        
+        # Jeśli arkusz jest pusty, zwracamy pusty DataFrame z odpowiednimi kolumnami
+        if df.empty:
+            return pd.DataFrame(columns=['id', 'data', 'kategoria', 'opis', 'kwota'])
+
+        # Standaryzacja nazw kolumn (małe litery)
+        df.columns = df.columns.str.lower().str.strip()
+        
+        # Konwersja typów (BARDZO WAŻNE W SHEETS)
+        df['data'] = pd.to_datetime(df['data'], errors='coerce')
+        
+        # Czyszczenie kwoty (jeśli przyszła jako tekst z "PLN" lub przecinkiem)
+        if df['kwota'].dtype == 'object':
+            df['kwota'] = df['kwota'].astype(str).str.replace('PLN', '').str.replace(',', '.').str.replace(' ', '')
+        
+        df['kwota'] = pd.to_numeric(df['kwota'], errors='coerce').fillna(0.0)
+        df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
+        
+        return df
+    except Exception as e:
+        st.error(f"⚠️ Błąd pobierania danych: {e}")
+        return pd.DataFrame(columns=['id', 'data', 'kategoria', 'opis', 'kwota'])
+
+def zapisz_calosc(df_to_save):
+    """Nadpisuje cały arkusz (używane przy edycji tabeli i imporcie CSV)."""
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_url(SPREADSHEET_URL)
+        worksheet = sh.worksheet(WORKSHEET_NAME)
+        
+        # Kopia do zapisu (zamiana daty na tekst string YYYY-MM-DD)
+        df_export = df_to_save.copy()
+        df_export['data'] = df_export['data'].dt.strftime('%Y-%m-%d')
+        
+        # Przygotowanie do gspread (lista list)
+        headers = df_export.columns.tolist()
+        values = df_export.values.tolist()
+        
+        # Czyszczenie i zapis
+        worksheet.clear()
+        worksheet.update([headers] + values)
+        
+        st.cache_data.clear() # Czyścimy cache Streamlit
+    except Exception as e:
+        st.error(f"❌ Błąd zapisu do Google Sheets: {e}")
+
+def dodaj_wiersz(nowy_wiersz_dict):
+    """Dodaje jeden wiersz na koniec (używane w 'Dodaj ręcznie')."""
+    try:
+        client = get_gspread_client()
+        sh = client.open_by_url(SPREADSHEET_URL)
+        worksheet = sh.worksheet(WORKSHEET_NAME)
+        
+        # Formatowanie wartości
+        values = [
+            int(nowy_wiersz_dict['id']),
+            nowy_wiersz_dict['data'].strftime('%Y-%m-%d'),
+            str(nowy_wiersz_dict['kategoria']),
+            str(nowy_wiersz_dict['opis']),
+            float(nowy_wiersz_dict['kwota'])
+        ]
+        
+        worksheet.append_row(values)
+        st.cache_data.clear()
+    except Exception as e:
+        st.error(f"❌ Błąd dodawania wiersza: {e}")
+
+# --- TWOJA FUNKCJA CSV (Lekko dostosowana do nazw kolumn) ---
 def przetworz_csv(uploaded_file):
     try:
         # PODEJŚCIE 1 (mBank)
         dane = pd.read_csv(uploaded_file, delimiter=';', encoding='utf-8', index_col=False, skiprows=25)
-        
-        # Czyszczenie nazw kolumn
         dane.columns = dane.columns.str.replace("#", "").str.strip()
         
-        # Mapowanie nazw
         dane = dane.rename(columns={
-            'Data operacji': 'Data',
-            'Opis operacji': 'Opis',
-            'Kwota': 'Kwota',
-            'Kategoria': 'Kategoria'
+            'Data operacji': 'data', 'Opis operacji': 'opis',
+            'Kwota': 'kwota', 'Kategoria': 'kategoria'
         })
 
         if 'Rachunek' in dane.columns:
             dane = dane.drop('Rachunek', axis=1)
 
-        # --- ✂️ NOWOŚĆ: ODCIĘCIE STOPKI (mBank) ---
-        # Często mBank ma puste wiersze lub stopkę na dole.
-        # Sprawdzamy, gdzie w kolumnie 'Data' pojawia się pierwsza pusta wartość (NaN).
-        if dane['Data'].isna().any():
-            pierwszy_pusty_wiersz = dane[dane['Data'].isna()].index[0]
-            # Bierzemy tylko wiersze OD góry DO pierwszego pustego
-            dane = dane.iloc[:pierwszy_pusty_wiersz]
-        # -------------------------------------------
+        # ✂️ ODCIĘCIE STOPKI (mBank)
+        if dane['data'].isna().any():
+            pierwszy_pusty = dane[dane['data'].isna()].index[0]
+            dane = dane.iloc[:pierwszy_pusty]
 
-        # Naprawa daty
-        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True, errors='coerce')
+        dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
         
         # Naprawa kwoty
-        dane['Kwota'] = dane['Kwota'].astype(str).str.replace(" PLN", "")
-        dane['Kwota'] = dane['Kwota'].str.replace(",", ".")
-        dane['Kwota'] = dane['Kwota'].str.replace(" ", "").astype(float)
+        dane['kwota'] = dane['kwota'].astype(str).str.replace(" PLN", "").str.replace(",", ".").str.replace(" ", "").astype(float)
         
-        # Uzupełnienie kategorii
-        if 'Kategoria' not in dane.columns:
-            dane['Kategoria'] = "Bez kategorii" 
-        else:
-            dane['Kategoria'] = dane['Kategoria'].fillna("Bez kategorii")
+        if 'kategoria' not in dane.columns: dane['kategoria'] = "Bez kategorii"
+        else: dane['kategoria'] = dane['kategoria'].fillna("Bez kategorii")
         
-        # Na wszelki wypadek usuwamy wiersze, gdzie data nadal jest pusta (NaT)
-        dane = dane.dropna(subset=['Data'])
-
-        return dane[['Data', 'Kategoria', 'Opis', 'Kwota']]
+        dane = dane.dropna(subset=['data'])
+        return dane[['data', 'kategoria', 'opis', 'kwota']]
 
     except Exception:
         # PODEJŚCIE 2 (ING)
@@ -80,315 +151,312 @@ def przetworz_csv(uploaded_file):
         dane.columns = dane.columns.str.replace("#", "").str.strip()
         
         dane = dane.rename(columns={
-            'Data transakcji': 'Data', 
-            'Dane kontrahenta': 'Opis',
-            'Kwota transakcji (waluta rachunku)': 'Kwota'
+            'Data transakcji': 'data', 'Dane kontrahenta': 'opis',
+            'Kwota transakcji (waluta rachunku)': 'kwota'
         })
 
-        # --- ✂️ ODCIĘCIE STOPKI (ING) ---
-        if dane['Data'].isna().any():
-            pierwszy_pusty_wiersz = dane[dane['Data'].isna()].index[0]
-            dane = dane.iloc[:pierwszy_pusty_wiersz]
-        # -------------------------------
+        # ✂️ ODCIĘCIE STOPKI (ING)
+        if dane['data'].isna().any():
+            pierwszy_pusty = dane[dane['data'].isna()].index[0]
+            dane = dane.iloc[:pierwszy_pusty]
 
-        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True, errors='coerce')
-        dane = dane.dropna(subset=['Data']) # Usuwamy błędne daty
-
-        dane['Kategoria'] = "Bez kategorii"
-        dane["Opis"] = "ING " + dane["Opis"].fillna("")
-
-        dane['Kwota'] = dane['Kwota'].astype(str).str.replace(" PLN", "")
-        dane['Kwota'] = dane['Kwota'].str.replace(",", ".")
-        dane['Kwota'] = dane['Kwota'].str.replace(" ", "").astype(float)
+        dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
+        dane = dane.dropna(subset=['data'])
         
-        dane['Kwota'] = dane['Kwota'] / 2
+        dane['kategoria'] = "Bez kategorii"
+        dane["opis"] = "ING " + dane["opis"].fillna("")
+        
+        dane['kwota'] = dane['kwota'].astype(str).str.replace(" PLN", "").str.replace(",", ".").str.replace(" ", "").astype(float)
+        dane['kwota'] = dane['kwota'] / 2
 
-        return dane[["Data", "Kategoria", "Opis", "Kwota"]]
-
-
-# --- 2. KARTA WGRYWANIA (Umieść to pod tytułem strony) ---
-with st.expander("📥 Wgraj wyciąg z banku (CSV)"):
-    uploaded_file = st.file_uploader("Wybierz plik CSV (mBank / ING)", type="csv")
+        return dane[['data', 'kategoria', 'opis', 'kwota']]
     
-    if uploaded_file is not None:
-        try:
-            # 1. Przetwarzamy
-            df_new = przetworz_csv(uploaded_file)
-            
-            st.write("Podgląd danych do wgrania:")
-            st.dataframe(df_new.head(3))
-            
-            if st.button("🔥 Dodaj te transakcje do bazy"):
-                # --- OBLICZANIE NOWYCH ID ---
-                cursor = conn.cursor()
-                try:
-                    result = cursor.execute("SELECT MAX(id) FROM dane").fetchone()
-                    # TU BYŁ BŁĄD. Dodajemy int(), żeby wymusić liczbę całkowitą
-                    if result[0] is not None:
-                        max_id = int(result[0])
-                    else:
-                        max_id = 0
-                except:
-                    max_id = 0
-                
-                # Teraz max_id jest na pewno intem, więc range zadziała
-                nowe_id = range(max_id + 1, max_id + 1 + len(df_new))
-                df_new['id'] = list(nowe_id) # Zamieniamy range na listę dla pewności
-                # ----------------------------
 
-                # Mapujemy nazwy kolumn na małe litery dla SQL
-                df_to_save = df_new.rename(columns={
-                    'Data': 'data',
-                    'Kategoria': 'kategoria',
-                    'Opis': 'opis',
-                    'Kwota': 'kwota'
-                })
+# --- 🛠️ NARZĘDZIE DO MIGRACJI (POPRAWIONE) ---
+st.sidebar.markdown("---")
+st.sidebar.subheader("🔧 Migracja")
+
+with st.sidebar.expander("⚠️ Przenieś dane z SQLite"):
+    st.warning("Ta operacja NADPISZE wszystko w Google Sheets danymi ze starej bazy SQL.")
+    
+    if st.button("🚀 Uruchom migrację"):
+        import sqlite3
+        
+        try:
+            # 1. Połączenie ze starą bazą
+            # Upewnij się, że nazwa pliku to 'baza1.db' (lub taka jaką masz w folderze)
+            conn_sql = sqlite3.connect('baza1.db') 
+            
+            st.write("Wczytuję dane z SQL...")
+            df_old = pd.read_sql("SELECT * FROM dane", conn_sql)
+            conn_sql.close()
+            
+            if df_old.empty:
+                st.error("Stara baza jest pusta!")
+            else:
+                # 2. Normalizacja nazw kolumn (wszystko na małe litery)
+                df_old.columns = df_old.columns.str.lower().str.strip()
                 
-                # Zapisujemy
-                df_to_save.to_sql('dane', conn, if_exists='append', index=False)
+                # Mapowanie (jeśli w SQL kolumny nazywały się inaczej, np. po polsku z dużej litery)
+                # To zabezpieczenie, gdyby lower() nie wystarczyło
+                mapa_kolumn = {
+                    'data operacji': 'data',
+                    'data transakcji': 'data',
+                    'opis operacji': 'opis',
+                    'dane kontrahenta': 'opis',
+                    'kwota': 'kwota',
+                    'kwota transakcji': 'kwota'
+                }
+                df_old = df_old.rename(columns=mapa_kolumn)
+
+                # --- 🛠️ TU BYŁ BŁĄD: NAPRAWA DATY ---
+                # Musimy powiedzieć Pandasowi: "To są daty, a nie napisy"
+                # errors='coerce' zamieni błędne daty na NaT (Not a Time)
+                df_old['data'] = pd.to_datetime(df_old['data'], dayfirst=True, errors='coerce')
                 
-                st.success(f"Dodano {len(df_new)} wierszy! (ID od {max_id + 1})")
+                # Usuwamy wiersze, gdzie data się nie udała (jest NaT)
+                df_old = df_old.dropna(subset=['data'])
+                # -------------------------------------
+
+                # Uzupełnienie brakujących kolumn
+                if 'id' not in df_old.columns:
+                    df_old['id'] = range(1, len(df_old) + 1)
+                
+                if 'kategoria' not in df_old.columns:
+                    df_old['kategoria'] = "Importowana"
+
+                # Wybieramy tylko te 5 kolumn, które pasują do Google Sheets
+                cols = ['id', 'data', 'kategoria', 'opis', 'kwota']
+                
+                # Filtrujemy dane (żeby nie wysłać śmieciowych kolumn)
+                # axis=1 dropna usuwa kolumny, których nie ma w liście cols, jeśli zrobimy reindex
+                df_to_migrate = df_old.reindex(columns=cols)
+                
+                # Upewnij się, że ID to liczby całkowite
+                df_to_migrate['id'] = df_to_migrate['id'].fillna(0).astype(int)
+                
+                st.write(f"Przygotowano {len(df_to_migrate)} wierszy. Wysyłam do Google...")
+                
+                # 3. WYSYŁKA
+                zapisz_calosc(df_to_migrate)
+                
+                st.success("✅ SUKCES! Dane przeniesione. Sprawdź Arkusz Google.")
                 st.rerun()
                 
         except Exception as e:
-            st.error(f"Błąd przetwarzania: {e}")
+            st.error(f"Błąd migracji: {e}")
+            # Pokaż szczegóły błędu, żeby łatwiej naprawić
+            import traceback
+            st.text(traceback.format_exc())
 
+# ==========================================
+# GŁÓWNA LOGIKA APLIKACJI
+# ==========================================
+
+st.sidebar.title("Nawigacja")
+strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Statystyki", "Dodaj ręcznie"])
+
+# Pobieramy dane na start (zamiast SQL SELECT)
+df_full = pobierz_dane()
+
+# ------------------------------------------------------------------
+# STRONA 1: TABELA DANYCH (View, Import, Edit)
+# ------------------------------------------------------------------
 if strona == "Tabela danych":
+    
+    # --- SEKCJA IMPORTU CSV ---
+    with st.expander("📥 Wgraj wyciąg z banku (CSV)"):
+        uploaded_file = st.file_uploader("Wybierz plik CSV (mBank / ING)", type="csv")
+        
+        if uploaded_file is not None:
+            st.write("Przetwarzanie...")
+            df_new = przetworz_csv(uploaded_file)
+            
+            if not df_new.empty:
+                st.write("Podgląd:")
+                st.dataframe(df_new.head(3))
+                
+                if st.button("🔥 Dodaj te transakcje do chmury"):
+                    # 1. Obliczamy ID (brak autoincrement w Sheets)
+                    max_id = df_full['id'].max() if not df_full.empty else 0
+                    if pd.isna(max_id): max_id = 0
+                    
+                    df_new['id'] = range(int(max_id) + 1, int(max_id) + 1 + len(df_new))
+                    
+                    # 2. Łączymy stare dane z nowymi
+                    df_updated = pd.concat([df_full, df_new], ignore_index=True)
+                    
+                    # 3. Zapisujemy całość
+                    zapisz_calosc(df_updated)
+                    
+                    st.success(f"Dodano {len(df_new)} transakcji!")
+                    st.rerun()
+            else:
+                st.error("Błąd odczytu pliku lub plik pusty.")
+
+    st.divider()
     st.subheader("📝 Edycja i Przegląd Wydatków")
 
-    LISTA_KATEGORII = ['Nieistotne', 'Wynagrodzenie', 'Wpływy', 'Elektronika', 'Wyjścia i wydarzenia', 'Żywność i chemia domowa', 'Przejazdy', 'Sport i hobby ', 'Wpływy - inne', 'Odzież i obuwie', 'Podróże i wyjazdy', 'ZaMieszkanie', 'Zdrowie i uroda', 'Regularne oszczędzanie', 'Serwis i części', 'Multimedia, książki i prasa', 'Wypłata gotówki', 'Opłaty i odsetki',  'Auto i transport - inne', 'Czynsz i wynajem', 'Paliwo', 'Akcesoria i wyposażenie ', 'Jedzenie poza domem',  'Prezenty i wsparcie',  'Bez kategorii']
-
-    # 1. Pobieramy dane, wskazując 'id' jako kręgosłup tabeli
-    try:
-        # index_col='id' sprawia, że Pandas używa Twojego ID do identyfikacji wierszy
-        df_full = pd.read_sql("SELECT * FROM dane", conn, index_col='id')
-    except Exception as e:
-        st.error(f"Problem z bazą (czy masz kolumnę 'id'?): {e}")
-        # Tworzymy pusty DataFrame na wypadek błędu
-        df_full = pd.DataFrame(columns=['Data', 'Kategoria', 'Opis', 'Kwota'])
-
-    # --- NAPRAWA DANYCH ---
-    if not df_full.empty:
-
-        df_full['Data'] = pd.to_datetime(df_full['Data'], dayfirst=True, errors='coerce')
-        if df_full['Kwota'].dtype == 'object':
-            df_full['Kwota'] = df_full['Kwota'].astype(str).str.replace(',', '.').str.replace(' ', '')
-            df_full['Kwota'] = pd.to_numeric(df_full['Kwota'], errors='coerce')
-
-    # ... (Wcześniej kod naprawy danych df_full) ...
-
-    # --- FILTRY Z PRZYCISKIEM "TEN MIESIĄC" ---
-
-    # 1. Funkcja pomocnicza: ustawia daty w pamięci (Session State) na bieżący miesiąc
+    # --- FILTRY I DATY (Twoja logika z session_state) ---
     def ustaw_obecny_miesiac():
         dzisiaj = datetime.date.today()
-        pierwszy_dzien = dzisiaj.replace(day=1) # Zamieniamy dzień na 1
-        # Ustawiamy w pamięci Streamlita nową wartość dla kalendarza
+        pierwszy_dzien = dzisiaj.replace(day=1)
         st.session_state['wybrane_daty'] = (pierwszy_dzien, dzisiaj)
 
-    # 2. Inicjalizacja domyślnych dat przy pierwszym uruchomieniu
-    # Jeśli w pamięci nic nie ma, ustawiamy zakres na podstawie danych z bazy lub dzisiejszy
     if 'wybrane_daty' not in st.session_state:
-        if not df_full.empty:
-            min_d = df_full['Data'].min().date()
-            max_d = df_full['Data'].max().date()
-            st.session_state['wybrane_daty'] = (min_d, max_d)
-        else:
-            st.session_state['wybrane_daty'] = (datetime.date.today(), datetime.date.today())
-
-
-    if 'wybrane_daty' not in st.session_state:
-        # Zamiast brać wszystko z bazy, bierzemy obecny miesiąc
+        # Domyślnie obecny miesiąc
         dzisiaj = datetime.date.today()
-        pierwszy_dzien_miesiaca = dzisiaj.replace(day=1)
-        
-        # Ustawiamy zakres: od 1. dnia miesiąca do dzisiaj
-        st.session_state['wybrane_daty'] = (pierwszy_dzien_miesiaca, dzisiaj)
-    # 3. Układ strony: 3 kolumny (Kategorie | Daty | Przycisk)
-    # Używamy proporcji [2, 2, 1], żeby przycisk był mniejszy
+        pierwszy = dzisiaj.replace(day=1)
+        st.session_state['wybrane_daty'] = (pierwszy, dzisiaj)
+
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
 
     with col_f1:
         filtry_kat = st.multiselect("Kategorie", LISTA_KATEGORII, default=LISTA_KATEGORII)
 
     with col_f2:
-        # Kluczowe: argument 'key="wybrane_daty"' wiąże ten kalendarz z pamięcią.
-        # Jak zmienimy coś w 'session_state', kalendarz sam się zaktualizuje.
         date_range = st.date_input("Zakres dat", key="wybrane_daty")
 
     with col_f3:
-        # Pusty tekst, żeby obniżyć przycisk (wyrównać go w dół do poziomu inputów)
-        st.write("") 
-        st.write("") 
-        # Przycisk wywołuje funkcję 'ustaw_obecny_miesiac' po kliknięciu
+        st.write("")
+        st.write("")
         st.button("📅 Ten miesiąc", on_click=ustaw_obecny_miesiac)
 
-    # --- APLIKOWANIE FILTRÓW (Bez zmian) ---
+    # --- APLIKOWANIE FILTRÓW ---
     df_view = df_full.copy()
 
-    # Obsługa przypadku, gdy użytkownik wybierze tylko jedną datę w kalendarzu
+    # Filtr daty
     if isinstance(date_range, tuple):
         if len(date_range) == 2:
             start_date, end_date = date_range
-            maska_daty = (df_view['Data'].dt.date >= start_date) & (df_view['Data'].dt.date <= end_date)
+            maska_daty = (df_view['data'].dt.date >= start_date) & (df_view['data'].dt.date <= end_date)
             df_view = df_view[maska_daty]
         elif len(date_range) == 1:
-            # Jeśli kliknąłeś dopiero start, a nie wybrałeś końca - pokaż tylko ten jeden dzień
             start_date = date_range[0]
-            maska_daty = (df_view['Data'].dt.date == start_date)
+            maska_daty = (df_view['data'].dt.date == start_date)
             df_view = df_view[maska_daty]
 
+    # Filtr kategorii
     if filtry_kat:
-        df_view = df_view[df_view['Kategoria'].isin(filtry_kat)]
+        df_view = df_view[df_view['kategoria'].isin(filtry_kat)]
 
-    df_view = df_view.sort_values(by='Data', ascending=False)
+    df_view = df_view.sort_values(by='data', ascending=False)
 
-    # ... (Dalej kod podsumowania i tabeli bez zmian) ...
-
-        # ... (tutaj skończyły się if-y od filtrowania daty i kategorii)
-        # df_view = df_view.sort_values(...)
-
-    # --- 🆕 NOWY KOD: PODSUMOWANIE ---
-    st.markdown("---") # Pozioma kreska dla porządku
-
-    # Obliczamy sumę i liczbę wierszy z tego, co aktualnie widać
-    suma_widoczna = df_view['Kwota'].sum()
+    # --- PODSUMOWANIE ---
+    st.markdown("---")
+    suma_widoczna = df_view['kwota'].sum()
     liczba_transakcji = len(df_view)
 
-    # Tworzymy 3 kolumny na liczniki
     c1, c2, c3 = st.columns(3)
-
     with c1:
         if suma_widoczna >= 0:
             st.metric("💰 Suma wpływów", f"{suma_widoczna:.2f} PLN")
         else:
             st.metric("💸 Suma wydatków", f"{suma_widoczna:.2f} PLN")
-
     with c2:
         st.metric("🧾 Liczba transakcji", f"{liczba_transakcji}")
-
     with c3:
-        # Mały bonus: średnia Kwota wydatku
         srednia = suma_widoczna / liczba_transakcji if liczba_transakcji > 0 else 0
         st.metric("📉 Średni wydatek", f"{srednia:.2f} PLN")
-
     st.markdown("---")
-# ---------------------------------
 
-# ... (tutaj zaczyna się df_edited = st.data_editor...)
-
-    # --- EDYTOR ---
-    df_edited = st.data_editor(
+    # --- EDYTOR DANYCH ---
+    df_edited_result = st.data_editor(
         df_view,
-        # Nie wymieniamy tu 'id', więc użytkownik go nie zobaczy w środku,
-        # ale Pandas pamięta, że on tam jest (jako index)
-        column_order=["Data", "Kategoria", "Opis", "Kwota"],
+        column_order=["data", "kategoria", "opis", "kwota"], # ukrywamy ID, ale jest w danych
         num_rows="dynamic",
         use_container_width=True,
         key="editor_glowny",
         column_config={
-            "Kwota": st.column_config.NumberColumn("Kwota", format="%.2f PLN", step=0.01),
-            "Data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
-            "Kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
+            "kwota": st.column_config.NumberColumn("Kwota", format="%.2f PLN", step=0.01),
+            "data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
+            "kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
         }
     )
 
-    # --- ZAPIS ZMIAN (Z obsługą ID) ---
-    if st.button("💾 Zapisz zmiany"):
+    # --- ZAPIS EDYCJI DO GOOGLE SHEETS ---
+    if st.button("💾 Zapisz zmiany w chmurze"):
         try:
-            # KROK A: Oddzielamy stare wiersze (które mają ID) od nowych (które nie mają)
-            # Wiersze istniejące mają ID będące liczbami. Nowe wiersze dodane w edytorze
-            # zazwyczaj mają indeks tymczasowy (nie pasujący do ID z bazy).
+            # 1. Znajdź ID, które były widoczne (edytowane)
+            widoczne_ids = df_edited_result['id'].tolist()
             
-            # 1. Usuwamy z głównej bazy (df_full) te wiersze, które były widoczne (zostaną nadpisane)
-            #    Używamy indeksów z df_view (czyli ID przefiltrowanych wierszy)
-            indeksy_do_usuniecia = df_view.index
+            # 2. Weź z pełnej bazy te, które były ukryte (nie ruszamy ich)
+            # dropna na ID, bo nowe wiersze dodane "plusem" mają NaN jako ID
+            df_reszta = df_full[~df_full['id'].isin(widoczne_ids)]
             
-            # Ale uwaga: jeśli dodałeś NOWY wiersz, jego indeksu nie ma w df_full.
-            # intersection zabezpiecza przed błędem "nie znaleziono indeksu"
-            istniejace_indeksy = df_full.index.intersection(indeksy_do_usuniecia)
-            df_reszta = df_full.drop(istniejace_indeksy)
+            # 3. Naprawiamy ID dla NOWYCH wierszy w edytorze
+            df_to_save = df_edited_result.copy()
             
-            # 2. Generowanie ID dla NOWYCH wierszy
-            # Musimy sprawdzić, czy w df_edited są wiersze, które nie mają poprawnego ID
+            max_id = df_full['id'].max()
+            if pd.isna(max_id): max_id = 0
             
-            # Znajdźmy najwyższe ID w bazie, żeby wiedzieć od ilu zacząć numerować nowe
-            if not df_full.empty and pd.api.types.is_integer_dtype(df_full.index):
-                max_id = df_full.index.max()
-            else:
-                max_id = 0
-                
-            # Resetujemy indeks w edytowanych danych, żeby naprawić nowo dodane wiersze
-            # Wiersze, które miały stare ID, zachowają je w kolumnie 'id' (po reset_index)
-            df_edited_reset = df_edited.reset_index()
+            # Iterujemy po wierszach edytora, żeby nadać ID tam gdzie brakuje
+            # Reset index, żeby móc iterować
+            df_to_save = df_to_save.reset_index(drop=True)
             
-            # Jeśli kolumna z indeksem nazywała się 'id', to teraz jest normalną kolumną.
-            # Jeśli nowy wiersz nie ma ID, trzeba mu je nadać.
-            
-            nowe_wiersze = []
-            gotowe_wiersze = []
-            
-            for index, row in df_edited_reset.iterrows():
-                # Sprawdzamy czy to wiersz z istniejącym ID (z bazy) czy nowy
-                # Istniejące ID powinno być liczbą całkowitą
-                obecne_id = row.get('id')
-                
-                # Prosta logika: jeśli ID jest puste lub nie jest liczbą z naszej bazy -> to nowy wiersz
-                if pd.isna(obecne_id) or (obecne_id not in df_full.index):
+            for idx, row in df_to_save.iterrows():
+                curr_id = row['id']
+                if pd.isna(curr_id) or curr_id == 0:
                     max_id += 1
-                    row['id'] = max_id
-                
-                gotowe_wiersze.append(row)
-                
-            # Składamy z powrotem DataFrame z edytowanych
-            df_edited_final = pd.DataFrame(gotowe_wiersze).set_index('id')
+                    df_to_save.at[idx, 'id'] = int(max_id)
             
-            # 3. Łączymy: Reszta (ukryte w filtrze) + Edytowane (widoczne)
-            df_final = pd.concat([df_reszta, df_edited_final])
+            # 4. Łączymy: Reszta + Edytowane
+            df_final = pd.concat([df_reszta, df_to_save], ignore_index=True)
+            df_final = df_final.sort_values(by='data', ascending=False)
             
-            # 4. Zapis do bazy
-            # index=True oznacza "Zapisz też indeks jako kolumnę w SQL"
-            # index_label='id' nazywa tę kolumnę 'id'
-            df_final.to_sql('dane', conn, if_exists='replace', index=True, index_label='id')
+            # 5. Zapisujemy do Sheets
+            zapisz_calosc(df_final)
             
-            st.success("Zapisano zmiany! ID zostały zachowane.")
+            st.success("✅ Zaktualizowano Google Sheets!")
             st.rerun()
             
         except Exception as e:
             st.error(f"Błąd zapisu: {e}")
 
+# ------------------------------------------------------------------
+# STRONA 2: STATYSTYKI
+# ------------------------------------------------------------------
 elif strona == "Statystyki":
     st.title("📊 Analiza wydatków")
-    st.write("Tu będą wykresy!")
     
-    
-    df = pd.read_sql("SELECT * FROM dane", conn)
-    if not df.empty:
-        
-        wydatki_kat = df.groupby("Kategoria")["Kwota"].sum()
-        st.bar_chart(wydatki_kat)
+    if df_full.empty:
+        st.info("Brak danych do wykresu.")
     else:
-        st.info("Brak danych do wykresu")
+        # Grupowanie
+        wydatki_kat = df_full.groupby("kategoria")["kwota"].sum().sort_values()
+        st.bar_chart(wydatki_kat)
 
+# ------------------------------------------------------------------
+# STRONA 3: DODAJ RĘCZNIE
+# ------------------------------------------------------------------
 elif strona == "Dodaj ręcznie":
     st.title("➕ Dodaj nowy wydatek")
     
-    # Prosty formularz
     with st.form("nowy_wydatek"):
-        Data = st.date_input("Data")
-        kat = st.text_input("Kategoria", "Jedzenie")
-        opis = st.text_input("Opis", "Zakupy")
-        Kwota = st.number_input("Kwota", step=0.01)
+        data_in = st.date_input("Data")
+        kat_in = st.selectbox("Kategoria", LISTA_KATEGORII)
+        opis_in = st.text_input("Opis", "Zakupy")
+        kwota_in = st.number_input("Kwota", step=0.01)
         
-        # Przycisk wysyłający formularz
-        submit = st.form_submit_button("Zapisz w bazie")
+        submit = st.form_submit_button("Zapisz w chmurze")
         
         if submit:
-            cursor = conn.cursor()
-            cursor.execute("INSERT INTO wydatki (Data, kategoria, opis, Kwota) VALUES (?, ?, ?, ?)", 
-                           (Data, kat, opis, Kwota))
-            conn.commit()
+            # 1. Obliczamy ID
+            max_id = df_full['id'].max() if not df_full.empty else 0
+            if pd.isna(max_id): max_id = 0
+            new_id = int(max_id) + 1
+            
+            # 2. Tworzymy słownik z danymi
+            nowy_wiersz = {
+                'id': new_id,
+                'data': data_in, # datetime object
+                'kategoria': kat_in,
+                'opis': opis_in,
+                'kwota': kwota_in
+            }
+            
+            # 3. Wysyłamy do Sheets (append_row jest szybkie)
+            dodaj_wiersz(nowy_wiersz)
+            
             st.success("Dodano wydatek!")
-
-# --- Na koniec zamykamy połączenie ---
-conn.close()
+            st.rerun()
