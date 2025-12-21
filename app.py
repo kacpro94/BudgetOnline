@@ -25,66 +25,82 @@ cursor.execute("""
 conn.commit()
 
 # --- 1. FUNKCJA PRZETWARZAJĄCA CSV (Twoja logika) ---
+# --- 1. FUNKCJA PRZETWARZAJĄCA CSV (Z ODCIĘCIEM PUSTYCH WIERSZY) ---
 def przetworz_csv(uploaded_file):
     try:
-        # PODEJŚCIE 1 (prawdopodobnie mBank)
-        dane = pd.read_csv(uploaded_file, delimiter=';', index_col=False, skiprows=25, encoding='utf-8')
-        dane.columns = dane.columns.str.replace("#", "")
+        # PODEJŚCIE 1 (mBank)
+        dane = pd.read_csv(uploaded_file, delimiter=';', encoding='utf-8', index_col=False, skiprows=25)
         
-        # Dostosowanie nazw kolumn do Twojej bazy
-        # Zakładam, że w tym pliku są takie kolumny jak 'Data operacji' itp.
-        # Jeśli nie, trzeba tu dostosować mapowanie
+        # Czyszczenie nazw kolumn
+        dane.columns = dane.columns.str.replace("#", "").str.strip()
+        
+        # Mapowanie nazw
         dane = dane.rename(columns={
             'Data operacji': 'Data',
             'Opis operacji': 'Opis',
             'Kwota': 'Kwota',
-            'Kategoria': 'Kategoria' # Jeśli jest w pliku
+            'Kategoria': 'Kategoria'
         })
 
-        # Usuwamy zbędne kolumny, jeśli istnieją
         if 'Rachunek' in dane.columns:
             dane = dane.drop('Rachunek', axis=1)
 
-        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True)
+        # --- ✂️ NOWOŚĆ: ODCIĘCIE STOPKI (mBank) ---
+        # Często mBank ma puste wiersze lub stopkę na dole.
+        # Sprawdzamy, gdzie w kolumnie 'Data' pojawia się pierwsza pusta wartość (NaN).
+        if dane['Data'].isna().any():
+            pierwszy_pusty_wiersz = dane[dane['Data'].isna()].index[0]
+            # Bierzemy tylko wiersze OD góry DO pierwszego pustego
+            dane = dane.iloc[:pierwszy_pusty_wiersz]
+        # -------------------------------------------
+
+        # Naprawa daty
+        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True, errors='coerce')
         
-        # Logika czyszczenia kwoty
+        # Naprawa kwoty
         dane['Kwota'] = dane['Kwota'].astype(str).str.replace(" PLN", "")
         dane['Kwota'] = dane['Kwota'].str.replace(",", ".")
         dane['Kwota'] = dane['Kwota'].str.replace(" ", "").astype(float)
         
-        # Jeśli nie ma kategorii, dodajemy pustą
+        # Uzupełnienie kategorii
         if 'Kategoria' not in dane.columns:
-            dane['Kategoria'] = "Inne" 
+            dane['Kategoria'] = "Bez kategorii" 
+        else:
+            dane['Kategoria'] = dane['Kategoria'].fillna("Bez kategorii")
+        
+        # Na wszelki wypadek usuwamy wiersze, gdzie data nadal jest pusta (NaT)
+        dane = dane.dropna(subset=['Data'])
 
-        # Wybieramy tylko te kolumny, które pasują do bazy
         return dane[['Data', 'Kategoria', 'Opis', 'Kwota']]
 
     except Exception:
-        # PODEJŚCIE 2 (prawdopodobnie ING - Twoja druga logika)
-        uploaded_file.seek(0) # <--- WAŻNE: Resetujemy plik do początku po nieudanym czytaniu wyżej
-        
+        # PODEJŚCIE 2 (ING)
+        uploaded_file.seek(0)
         dane = pd.read_csv(uploaded_file, encoding='cp1250', delimiter=';', index_col=False, skiprows=19)
-        dane.columns = dane.columns.str.replace("#", "")
+        dane.columns = dane.columns.str.replace("#", "").str.strip()
         
-        # Mapowanie nazw
         dane = dane.rename(columns={
             'Data transakcji': 'Data', 
             'Dane kontrahenta': 'Opis',
             'Kwota transakcji (waluta rachunku)': 'Kwota'
         })
 
-        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True)
+        # --- ✂️ ODCIĘCIE STOPKI (ING) ---
+        if dane['Data'].isna().any():
+            pierwszy_pusty_wiersz = dane[dane['Data'].isna()].index[0]
+            dane = dane.iloc[:pierwszy_pusty_wiersz]
+        # -------------------------------
 
-        # Dodatkowa obróbka ING
-        dane['Kategoria'] = "Inne" # Domyślna kategoria
-        dane["Opis"] = "ING " + dane["Opis"].fillna("") # Dodajemy prefiks ING
+        dane['Data'] = pd.to_datetime(dane['Data'], dayfirst=True, errors='coerce')
+        dane = dane.dropna(subset=['Data']) # Usuwamy błędne daty
 
-        # Czyszczenie kwoty
+        dane['Kategoria'] = "Bez kategorii"
+        dane["Opis"] = "ING " + dane["Opis"].fillna("")
+
         dane['Kwota'] = dane['Kwota'].astype(str).str.replace(" PLN", "")
         dane['Kwota'] = dane['Kwota'].str.replace(",", ".")
         dane['Kwota'] = dane['Kwota'].str.replace(" ", "").astype(float)
         
-        # Twoja logika dzielenia na pół (wspólne konto?)
         dane['Kwota'] = dane['Kwota'] / 2
 
         return dane[["Data", "Kategoria", "Opis", "Kwota"]]
