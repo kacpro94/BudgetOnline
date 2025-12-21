@@ -4,10 +4,8 @@ import gspread
 from google.oauth2.service_account import Credentials
 import datetime
 
-# --- KONFIGURACJA STRONY ---
 st.set_page_config(page_title="Budżet (Google Sheets)", layout="wide")
 
-# --- KONFIGURACJA GSPREAD (POŁĄCZENIE) ---
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -20,11 +18,11 @@ def get_gspread_client():
     client = gspread.authorize(creds)
     return client
 
-# --- ⚙️ USTAWIENIA ARKUSZA ---
+
 SPREADSHEET_URL = "https://docs.google.com/spreadsheets/d/1GdbHX0mKbwyJhjmcG3jgtN9E8BJVSSunRYvfSLUjSIc/edit?usp=sharing"  # <--- WAŻNE: Wklej link!
 WORKSHEET_NAME = "dane"
 
-# --- LISTA KATEGORII (Twoja) ---
+
 LISTA_KATEGORII = [
     'Nieistotne', 'Wynagrodzenie', 'Wpływy', 'Elektronika', 'Wyjścia i wydarzenia',
     'Żywność i chemia domowa', 'Przejazdy', 'Sport i hobby ', 'Wpływy - inne',
@@ -35,11 +33,10 @@ LISTA_KATEGORII = [
     'Jedzenie poza domem', 'Prezenty i wsparcie', 'Bez kategorii'
 ]
 
-# --- FUNKCJE POMOCNICZE (ZAMIAST SQL) ---
 
-# --- FUNKCJA DO NAPRAWY LICZB (PANCERNA) ---
+
+
 def wyczysc_kwote(wartosc):
-    """Zamienia dowolny dziwny format (1 200,00 PLN) na czysty float (1200.0)."""
     if pd.isna(wartosc) or wartosc == "":
         return 0.0
     
@@ -79,10 +76,8 @@ def pobierz_dane():
         df.columns = df.columns.str.lower().str.strip()
         df['data'] = pd.to_datetime(df['data'], errors='coerce')
         
-        # --- UŻYCIE NOWEJ FUNKCJI ---
-        # To naprawi liczby, które Google Sheets mógł zapisać w dziwnym formacie
+
         df['kwota'] = df['kwota'].apply(wyczysc_kwote)
-        # ----------------------------
         
         df['id'] = pd.to_numeric(df['id'], errors='coerce').fillna(0).astype(int)
         
@@ -98,19 +93,16 @@ def zapisz_calosc(df_to_save):
         sh = client.open_by_url(SPREADSHEET_URL)
         worksheet = sh.worksheet(WORKSHEET_NAME)
         
-        # Kopia do zapisu (zamiana daty na tekst string YYYY-MM-DD)
         df_export = df_to_save.copy()
         df_export['data'] = df_export['data'].dt.strftime('%Y-%m-%d')
         
-        # Przygotowanie do gspread (lista list)
         headers = df_export.columns.tolist()
         values = df_export.values.tolist()
         
-        # Czyszczenie i zapis
         worksheet.clear()
         worksheet.update([headers] + values)
         
-        st.cache_data.clear() # Czyścimy cache Streamlit
+        st.cache_data.clear() 
     except Exception as e:
         st.error(f"❌ Błąd zapisu do Google Sheets: {e}")
 
@@ -150,14 +142,12 @@ def przetworz_csv(uploaded_file):
         if 'Rachunek' in dane.columns:
             dane = dane.drop('Rachunek', axis=1)
 
-        # ✂️ ODCIĘCIE STOPKI (mBank)
         if dane['data'].isna().any():
             pierwszy_pusty = dane[dane['data'].isna()].index[0]
             dane = dane.iloc[:pierwszy_pusty]
 
         dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
         
-        # Naprawa kwoty
         dane['kwota'] = dane['kwota'].apply(wyczysc_kwote)
         
         if 'kategoria' not in dane.columns: dane['kategoria'] = "Bez kategorii"
@@ -167,7 +157,7 @@ def przetworz_csv(uploaded_file):
         return dane[['data', 'kategoria', 'opis', 'kwota']]
 
     except Exception:
-        # PODEJŚCIE 2 (ING)
+
         uploaded_file.seek(0)
         dane = pd.read_csv(uploaded_file, encoding='cp1250', delimiter=';', index_col=False, skiprows=19)
         dane.columns = dane.columns.str.replace("#", "").str.strip()
@@ -177,7 +167,6 @@ def przetworz_csv(uploaded_file):
             'Kwota transakcji (waluta rachunku)': 'kwota'
         })
 
-        # ✂️ ODCIĘCIE STOPKI (ING)
         if dane['data'].isna().any():
             pierwszy_pusty = dane[dane['data'].isna()].index[0]
             dane = dane.iloc[:pierwszy_pusty]
@@ -202,7 +191,6 @@ def przetworz_csv(uploaded_file):
 st.sidebar.title("Nawigacja")
 strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Statystyki", "Dodaj ręcznie"])
 
-# Pobieramy dane na start (zamiast SQL SELECT)
 df_full = pobierz_dane()
 
 # ------------------------------------------------------------------
@@ -290,7 +278,10 @@ if strona == "Tabela danych":
 
     # --- PODSUMOWANIE ---
     st.markdown("---")
-    suma_widoczna = df_view['kwota'].sum()
+    suma_widoczna = pd.to_numeric(
+        df_view.loc[~df_view['kategoria'].isin(["Bez kategorii", "Regularne oszczędzanie",'Nieistotne']), 'kwota'],
+        errors='coerce'
+    ).fillna(0).sum()
     liczba_transakcji = len(df_view)
 
     c1, c2, c3 = st.columns(3)
@@ -307,59 +298,82 @@ if strona == "Tabela danych":
     st.markdown("---")
 
     # --- EDYTOR TABELI STREAMLIT ---
+    # Dodajemy hide_index=True, żeby usunąć tę dziwną pierwszą kolumnę
     df_edited_result = st.data_editor(
         df_view,
         column_order=["data", "kategoria", "opis", "kwota"],
         num_rows="dynamic",
         use_container_width=True,
+        hide_index=True,  # <--- TO USUWA "DZIWNĄ KOLUMNĘ"
         key="editor_glowny",
         column_config={
-            # format="%.2f" usuwa mylące przecinki tysięcy. 
-            # Zamiast '1,200.50' zobaczysz '1200.50' -> CZYTELNIEJ
             "kwota": st.column_config.NumberColumn("Kwota (PLN)", format="%.2f", step=0.01),
             "data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
             "kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
         }
     )
 
-    # --- ZAPIS EDYCJI DO GOOGLE SHEETS ---
+    # --- ZAPIS EDYCJI DO GOOGLE SHEETS (POPRAWIONY - OBSŁUGUJE USUWANIE) ---
     if st.button("💾 Zapisz zmiany w chmurze"):
         try:
-            # 1. Znajdź ID, które były widoczne (edytowane)
-            widoczne_ids = df_edited_result['id'].tolist()
+            # A. LOGIKA USUWANIA
+            # Musimy sprawdzić, co zniknęło z widoku (df_view), a nie z całej bazy.
             
-            # 2. Weź z pełnej bazy te, które były ukryte (nie ruszamy ich)
-            # dropna na ID, bo nowe wiersze dodane "plusem" mają NaN jako ID
-            df_reszta = df_full[~df_full['id'].isin(widoczne_ids)]
+            # 1. ID, które były widoczne PRZED edycją (wczytane do edytora)
+            ids_przed_edycja = set(df_view['id'].tolist())
             
-            # 3. Naprawiamy ID dla NOWYCH wierszy w edytorze
-            df_to_save = df_edited_result.copy()
+            # 2. ID, które zostały PO edycji (to co oddał edytor)
+            ids_po_edycji = set(df_edited_result['id'].dropna().tolist()) # dropna bo nowe wiersze nie mają ID
             
+            # 3. Różnica = to co Użytkownik usunął klawiszem Delete
+            ids_usuniete = ids_przed_edycja - ids_po_edycji
+            
+            # 4. Usuwamy te ID z głównej bazy (df_full)
+            # Zostawiamy wiersze, których ID NIE JEST w zbiorze usuniętych
+            df_po_usunieciu = df_full[~df_full['id'].isin(ids_usuniete)]
+            
+            # B. LOGIKA AKTUALIZACJI I DODAWANIA
+            # Teraz musimy zaktualizować wiersze, które zostały w edytorze (mogły być zmienione)
+            # oraz dodać nowe.
+            
+            # 1. Oddzielamy wiersze, które edytor nam zwrócił
+            df_to_update = df_edited_result.copy()
+            
+            # 2. Usuwamy z bazy (df_po_usunieciu) stare wersje wierszy, które teraz nadpiszemy
+            # (czyli te, które są w df_to_update i mają ID)
+            ids_do_aktualizacji = df_to_update['id'].dropna().tolist()
+            df_baza_bez_edytowanych = df_po_usunieciu[~df_po_usunieciu['id'].isin(ids_do_aktualizacji)]
+            
+            # 3. Nadawanie ID dla NOWYCH wierszy (dodanych plusem)
             max_id = df_full['id'].max()
             if pd.isna(max_id): max_id = 0
             
-            # Iterujemy po wierszach edytora, żeby nadać ID tam gdzie brakuje
-            # Reset index, żeby móc iterować
-            df_to_save = df_to_save.reset_index(drop=True)
+            # Reset index do iteracji
+            df_to_update = df_to_update.reset_index(drop=True)
             
-            for idx, row in df_to_save.iterrows():
+            for idx, row in df_to_update.iterrows():
                 curr_id = row['id']
+                # Jeśli ID jest puste (NaN) lub 0 -> to nowy wiersz
                 if pd.isna(curr_id) or curr_id == 0:
                     max_id += 1
-                    df_to_save.at[idx, 'id'] = int(max_id)
+                    df_to_update.at[idx, 'id'] = int(max_id)
             
-            # 4. Łączymy: Reszta + Edytowane
-            df_final = pd.concat([df_reszta, df_to_save], ignore_index=True)
+            # 4. SKLEJAMY: (Reszta bazy) + (To co wyszło z edytora)
+            df_final = pd.concat([df_baza_bez_edytowanych, df_to_update], ignore_index=True)
+            
+            # Sortowanie i wysyłka
             df_final = df_final.sort_values(by='data', ascending=False)
             
-            # 5. Zapisujemy do Sheets
             zapisz_calosc(df_final)
             
-            st.success("✅ Zaktualizowano Google Sheets!")
+            st.success("✅ Zapisano! (Uwzględniono edycję, dodawanie i usuwanie)")
             st.rerun()
             
         except Exception as e:
             st.error(f"Błąd zapisu: {e}")
+            # Pokaż szczegóły błędu do debugowania
+            import traceback
+            st.text(traceback.format_exc())
 
 # ------------------------------------------------------------------
 # STRONA 2: STATYSTYKI
