@@ -5,6 +5,7 @@ from google.oauth2.service_account import Credentials
 import datetime
 import traceback
 import altair as alt
+from dateutil.relativedelta import relativedelta
 
 st.set_page_config(page_title="Budżet (Google Sheets)", layout="wide")
 
@@ -191,9 +192,26 @@ def przetworz_csv(uploaded_file):
 # ==========================================
 
 st.sidebar.title("Nawigacja")
-strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Wydatki w czasie", "Wydatki według kategorii"])
+st.sidebar.text("Wybór banku")
+ing = st.sidebar.checkbox("ING", value=True, key="bank_ing")
+mbank = st.sidebar.checkbox("mBank", value=True, key="bank_mbank")
 
 df_full = pobierz_dane()
+selected_banks = []
+if ing:
+    selected_banks.append("ING")
+if mbank:
+    selected_banks.append("mBank")
+strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Wydatki w czasie", "Wydatki według kategorii"])
+
+if len(selected_banks)>1:
+    df_full=df_full
+elif selected_banks[0]=='ING':
+    df_full = df_full[df_full['opis'].astype(str).str.contains('ing', case=False, na=False)]
+elif selected_banks[0]=='mBank':
+    df_full = df_full[~df_full['opis'].astype(str).str.contains('ing', case=False, na=False)]
+else:
+    df_full=df_full
 
 # ------------------------------------------------------------------
 # STRONA 1: TABELA DANYCH (View, Import, Edit)
@@ -363,7 +381,8 @@ elif strona == "Wydatki w czasie":
     
     def ustaw_obecny_rok():
         dzis=datetime.date.today()
-        pierwszy_month=dzis.replace(month=1,day=1)
+        month_a = dzis-relativedelta(month=12)
+        pierwszy_month=month_a.replace(month=1,day=1)
         st.session_state['wybrane_daty']=(pierwszy_month,dzis)
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
