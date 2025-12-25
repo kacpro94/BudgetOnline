@@ -361,7 +361,10 @@ elif strona == "Wydatki w czasie":
     st.title("📊 Analiza wydatków w czasie")
 
     
-    
+    def ustaw_obecny_rok():
+        dzis=datetime.date.today()
+        pierwszy_month=dzis.replace(month=1,day=1)
+        st.session_state['wybrane_daty']=(pierwszy_month,dzis)
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
 
@@ -370,6 +373,16 @@ elif strona == "Wydatki w czasie":
 
     with col_f2:
         date_range = st.date_input("Zakres dat", key="wybrane_daty")
+
+    with col_f3:
+        st.write("")
+        st.write("")
+        st.button("📅 Ten rok", on_click=ustaw_obecny_rok)
+
+    if 'wybrane_daty' not in st.session_state:
+        dzis=datetime.date.today()
+        pierwszy_month=dzis.replace(month=1,day=1)
+        st.session_state['wybrane_daty']=(pierwszy_month,dzis)
 
 
     
@@ -395,6 +408,7 @@ elif strona == "Wydatki w czasie":
         wydatki_kat = df_stats.groupby(['miesiac'])['kwota'].sum()
         df_plot = wydatki_kat.reset_index().rename(columns={'kwota': 'kwota', 'miesiac': 'miesiac'})
 
+        klikniecie = alt.selection_point(fields=['miesiac'], name="klik")
 
         chart = alt.Chart(df_plot).mark_bar().encode(
             x=alt.X('miesiac:N', title='Miesiąc'),
@@ -402,6 +416,11 @@ elif strona == "Wydatki w czasie":
             tooltip=[alt.Tooltip('miesiac:N', title='Miesiąc'), alt.Tooltip('kwota:Q', title='Kwota', format='.2f')]
         ).properties(
             title='Wydatki wg miesiąca'
+        ).add_params(
+            klikniecie 
+        ).properties(
+            title='Kliknij na słupek, aby zobaczyć szczegóły',
+            width=800
         )
 
         labels = alt.Chart(df_plot).mark_text(dy=5, color='white').encode(
@@ -410,70 +429,253 @@ elif strona == "Wydatki w czasie":
             text=alt.Text('kwota:Q', format='.2f')
         )
 
-        # ustawienie stałego koloru słupków (np. granatowy)
-        chart = chart.mark_bar(color="#720094")
-        st.altair_chart(chart + labels, use_container_width=True)
+        # # ustawienie stałego koloru słupków (np. granatowy)
+        # chart = chart.mark_bar(color="#720094")
+        # st.altair_chart(chart + labels, use_container_width=True)
+
+        event = st.altair_chart(
+            chart,
+            use_container_width=True,
+            on_select="rerun" 
+        )
+
+        # --- 5. ODCZYT DANYCH ---
+        wybrany_przedzial = None
+
+        # Sprawdzamy czy w zwróconym obiekcie 'selection' istnieje nasz nazwany selektor "klik"
+        if event.selection and "klik" in event.selection:
+            # event.selection["klik"] to lista słowników, np. [{'kategoria': 'Jedzenie'}]
+            dane_wyboru = event.selection["klik"]
+            if dane_wyboru:
+                wybrany_przedzial = dane_wyboru[0]["miesiac"]
+
+            # --- 6. TABELA SZCZEGÓŁÓW ---
+            if wybrany_przedzial:
+                st.divider()
+                st.markdown(f"### 🔍 Szczegóły: **{wybrany_przedzial}**")
+                
+                szczegoly = df_stats[df_stats['miesiac'] == wybrany_przedzial].copy()
+                szczegoly = szczegoly.sort_values(by='data', ascending=False)
+                
+                sum_kat = szczegoly['kwota'].sum()
+                st.caption(f"Łączna suma w tym widoku: {-sum_kat:.2f} PLN")
+
+                df_edited_result = st.data_editor(
+                szczegoly,
+                column_order=["data", "kategoria", "opis", "kwota"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,  
+                key="editor_glowny",
+                column_config={
+                    "kwota": st.column_config.NumberColumn("Kwota (PLN)", format="%.2f", step=0.01),
+                    "data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
+                    "kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
+                }
+            )
+
+                if st.button("💾 Zapisz zmiany w chmurze"):
+                    try:
+                        ids_przed_edycja = set(szczegoly['id'].tolist())
+                        
+                        ids_po_edycji = set(df_edited_result['id'].dropna().tolist()) # dropna bo nowe wiersze nie mają ID
+                        ids_usuniete = ids_przed_edycja - ids_po_edycji
+                        df_po_usunieciu = df_full[~df_full['id'].isin(ids_usuniete)]
+                        
+                        # B. LOGIKA AKTUALIZACJI I DODAWANIA
+                        # Teraz musimy zaktualizować wiersze, które zostały w edytorze (mogły być zmienione)
+                        # oraz dodać nowe.
+                        
+                        # 1. Oddzielamy wiersze, które edytor nam zwrócił
+                        df_to_update = df_edited_result.copy()
+                        ids_do_aktualizacji = df_to_update['id'].dropna().tolist()
+                        df_baza_bez_edytowanych = df_po_usunieciu[~df_po_usunieciu['id'].isin(ids_do_aktualizacji)]
+                        
+                        max_id = df_full['id'].max()
+                        if pd.isna(max_id): max_id = 0
+                        
+                        # Reset index do iteracji
+                        df_to_update = df_to_update.reset_index(drop=True)
+                        
+                        for idx, row in df_to_update.iterrows():
+                            curr_id = row['id']
+                            # Jeśli ID jest puste (NaN) lub 0 -> to nowy wiersz
+                            if pd.isna(curr_id) or curr_id == 0:
+                                max_id += 1
+                                df_to_update.at[idx, 'id'] = int(max_id)
+                        
+                        df_final = pd.concat([df_baza_bez_edytowanych, df_to_update], ignore_index=True)
+                        
+                        df_final = df_final.sort_values(by='data', ascending=False)
+                        
+                        zapisz_calosc(df_final)
+                        
+                        st.success("✅ Zapisano! (Uwzględniono edycję, dodawanie i usuwanie)")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Błąd zapisu: {e}")
+                        # Pokaż szczegóły błędu do debugowania
 # ------------------------------------------------------------------
 # STRONA 3
 # ------------------------------------------------------------------
 elif strona == "Wydatki według kategorii":
     st.title("📊 Analiza wydatków według kategorii")
 
+    def ustaw_obecny_m():
+        dzisiaj=datetime.date.today()
+        pierwyszy_dzine=dzisiaj.replace(day=1)
+        st.session_state['wybrane_daty'] = (pierwyszy_dzine, dzisiaj)
     
     
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
-
     with col_f1:
         filtry_kat = st.multiselect("Kategorie", LISTA_KATEGORII)
-
     with col_f2:
         date_range = st.date_input("Zakres dat", key="wybrane_daty")
+    with col_f3:
+        st.write("")
+        st.write("")
+        st.button("📅 Ten miesiąc", on_click=ustaw_obecny_m)
+
+    if 'wybrane_daty' not in st.session_state:
+        dzis=datetime.date.today()
+        pierwszy_month=dzis.replace(month=1,day=1)
+        st.session_state['wybrane_daty']=(pierwszy_month,dzis)
 
 
-    
     if df_full.empty:
         st.info("Brak danych do wykresu.")
     else:
-   
         df_stats = df_full.copy()
-        df_stats= df_stats[~df_stats['kategoria'].isin(['Nieistotne','Nieistotne - inne','Bez kategorii','Regularne oszczędzanie','Wpływy','Wpływy - inne','Wynagrodzenie'])]
+        
+        # Filtrowanie kategorii technicznych
+        df_stats = df_stats[~df_stats['kategoria'].isin([
+            'Nieistotne', 'Bez kategorii', 'Regularne oszczędzanie',
+            'Wpływy', 'Wpływy - inne', 'Wynagrodzenie'
+        ])]
+
+        # Filtry dat i multiselect
         if isinstance(date_range, tuple):
             if len(date_range) == 2:
-                start_date, end_date = date_range
-                df_stats = df_stats[(df_stats['data'].dt.date >= start_date) & (df_stats['data'].dt.date <= end_date)]
+                s, e = date_range
+                df_stats = df_stats[(df_stats['data'].dt.date >= s) & (df_stats['data'].dt.date <= e)]
             elif len(date_range) == 1:
-                start_date = date_range[0]
-                df_stats = df_stats[df_stats['data'].dt.date == start_date]
+                df_stats = df_stats[df_stats['data'].dt.date == date_range[0]]
 
         if filtry_kat:
             df_stats = df_stats[df_stats['kategoria'].isin(filtry_kat)]
 
- 
-        df_stats['miesiac'] = df_stats['data'].dt.to_period('M').astype(str)
+        # Agregacja i SORTOWANIE
         wydatki_kat = -df_stats.groupby(['kategoria'])['kwota'].sum()
-
         df_plot = wydatki_kat.reset_index().rename(columns={'kwota': 'kwota', 'kategoria': 'kategoria'})
-        # sortuj od największego do najmniejszego
         df_plot = df_plot.sort_values('kwota', ascending=False)
+
+        klikniecie = alt.selection_point(fields=['kategoria'], name="klik")
 
         chart = alt.Chart(df_plot).mark_bar(color="#720094").encode(
             x=alt.X('kwota:Q', title='Suma (PLN)'),
             y=alt.Y('kategoria:N',
                 sort=alt.EncodingSortField(field='kwota', order='descending'),
                 title='Kategoria',
-                axis=alt.Axis(labelLimit=400)  
+                axis=alt.Axis(labelLimit=400)
             ),
-            tooltip=[alt.Tooltip('kategoria:N', title='Kategoria'), alt.Tooltip('kwota:Q', title='Kwota', format='.2f')]
+            # Sprawiamy, że nieaktywne słupki będą szare (wizualne potwierdzenie kliknięcia)
+            opacity=alt.condition(klikniecie, alt.value(1), alt.value(0.3)),
+            tooltip=[
+                alt.Tooltip('kategoria:N', title='Kategoria'),
+                alt.Tooltip('kwota:Q', title='Kwota', format='.2f')
+            ]
+        ).add_params(
+            klikniecie 
         ).properties(
-            title='Wydatki wg kategorii',
-            width=800  # więcej szerokości wykresu, by etykiety się mieściły
+            title='Kliknij na słupek, aby zobaczyć szczegóły',
+            width=800
         )
 
-        labels = alt.Chart(df_plot).mark_text(dx=3, dy=0, color='white', size=13).encode(
-            x=alt.X('kwota:Q'),
-            y=alt.Y('kategoria:N', sort=alt.EncodingSortField(field='kwota', order='descending')),
-            text=alt.Text('kwota:Q', format='.2f')
+        # --- 4. WYŚWIETLANIE ---
+        # Nadal używamy on_select="rerun", żeby odświeżyć stronę po kliknięciu
+        event = st.altair_chart(
+            chart,
+            use_container_width=True,
+            on_select="rerun" 
         )
 
-        st.altair_chart(chart + labels, use_container_width=True)
+        # --- 5. ODCZYT DANYCH ---
+        wybrany_przedzial = None
+
+        # Sprawdzamy czy w zwróconym obiekcie 'selection' istnieje nasz nazwany selektor "klik"
+        if event.selection and "klik" in event.selection:
+            # event.selection["klik"] to lista słowników, np. [{'kategoria': 'Jedzenie'}]
+            dane_wyboru = event.selection["klik"]
+            if dane_wyboru:
+                wybrany_przedzial = dane_wyboru[0]["kategoria"]
+
+            # --- 6. TABELA SZCZEGÓŁÓW ---
+            if wybrany_przedzial:
+                st.divider()
+                st.markdown(f"### 🔍 Szczegóły: **{wybrany_przedzial}**")
+                
+                szczegoly = df_stats[df_stats['kategoria'] == wybrany_przedzial].copy()
+                szczegoly = szczegoly.sort_values(by='data', ascending=False)
+                
+                sum_kat = szczegoly['kwota'].sum()
+                st.caption(f"Łączna suma w tym widoku: {-sum_kat:.2f} PLN")
+
+                df_edited_result = st.data_editor(
+                szczegoly,
+                column_order=["data", "kategoria", "opis", "kwota"],
+                num_rows="dynamic",
+                use_container_width=True,
+                hide_index=True,  
+                key="editor_glowny",
+                column_config={
+                    "kwota": st.column_config.NumberColumn("Kwota (PLN)", format="%.2f", step=0.01),
+                    "data": st.column_config.DateColumn("Data", format="YYYY-MM-DD"),
+                    "kategoria": st.column_config.SelectboxColumn("Kategoria", options=LISTA_KATEGORII, required=True)
+                }
+            )
+
+                if st.button("💾 Zapisz zmiany w chmurze"):
+                    try:
+                        ids_przed_edycja = set(szczegoly['id'].tolist())
+                        
+                        ids_po_edycji = set(df_edited_result['id'].dropna().tolist()) # dropna bo nowe wiersze nie mają ID
+                        ids_usuniete = ids_przed_edycja - ids_po_edycji
+                        df_po_usunieciu = df_full[~df_full['id'].isin(ids_usuniete)]
+                        
+                        # B. LOGIKA AKTUALIZACJI I DODAWANIA
+                        # Teraz musimy zaktualizować wiersze, które zostały w edytorze (mogły być zmienione)
+                        # oraz dodać nowe.
+                        
+                        # 1. Oddzielamy wiersze, które edytor nam zwrócił
+                        df_to_update = df_edited_result.copy()
+                        ids_do_aktualizacji = df_to_update['id'].dropna().tolist()
+                        df_baza_bez_edytowanych = df_po_usunieciu[~df_po_usunieciu['id'].isin(ids_do_aktualizacji)]
+                        
+                        max_id = df_full['id'].max()
+                        if pd.isna(max_id): max_id = 0
+                        
+                        # Reset index do iteracji
+                        df_to_update = df_to_update.reset_index(drop=True)
+                        
+                        for idx, row in df_to_update.iterrows():
+                            curr_id = row['id']
+                            # Jeśli ID jest puste (NaN) lub 0 -> to nowy wiersz
+                            if pd.isna(curr_id) or curr_id == 0:
+                                max_id += 1
+                                df_to_update.at[idx, 'id'] = int(max_id)
+                        
+                        df_final = pd.concat([df_baza_bez_edytowanych, df_to_update], ignore_index=True)
+                        
+                        df_final = df_final.sort_values(by='data', ascending=False)
+                        
+                        zapisz_calosc(df_final)
+                        
+                        st.success("✅ Zapisano! (Uwzględniono edycję, dodawanie i usuwanie)")
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Błąd zapisu: {e}")
+                        # Pokaż szczegóły błędu do debugowania
