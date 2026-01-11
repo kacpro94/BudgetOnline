@@ -29,11 +29,11 @@ WORKSHEET_NAME = "dane"
 LISTA_KATEGORII = [
     'Nieistotne', 'Wynagrodzenie', 'Wpływy', 'Elektronika', 'Wyjścia i wydarzenia',
     'Żywność i chemia domowa', 'Przejazdy', 'Sport i hobby ', 'Wpływy - inne',
-    'Odzież i obuwie', 'Podróże i wyjazdy', 'ZaMieszkanie', 'Zdrowie i uroda',
+    'Odzież i obuwie', 'Podróże i wyjazdy', 'Rozrywka', 'Zdrowie i uroda',
     'Regularne oszczędzanie', 'Serwis i części', 'Multimedia, książki i prasa',
     'Wypłata gotówki', 'Opłaty i odsetki', 'Auto i transport - inne',
     'Czynsz i wynajem', 'Paliwo', 'Akcesoria i wyposażenie ',
-    'Jedzenie poza domem', 'Prezenty i wsparcie', 'Bez kategorii'
+    'Jedzenie poza domem', 'Prezenty i wsparcie', 'Bez kategorii','ZaMieszkanie'
 ]
 
 
@@ -130,8 +130,9 @@ def dodaj_wiersz(nowy_wiersz_dict):
     except Exception as e:
         st.error(f"❌ Błąd dodawania wiersza: {e}")
 
-# --- TWOJA FUNKCJA CSV (Lekko dostosowana do nazw kolumn) ---
+
 def przetworz_csv(uploaded_file):
+    uploaded_file.seek(0)
     try:
         # PODEJŚCIE 1 (mBank)
         dane = pd.read_csv(uploaded_file, delimiter=';', encoding='utf-8', index_col=False, skiprows=25)
@@ -149,7 +150,7 @@ def przetworz_csv(uploaded_file):
             pierwszy_pusty = dane[dane['data'].isna()].index[0]
             dane = dane.iloc[:pierwszy_pusty]
 
-        dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
+        dane['data'] = pd.to_datetime(dane['data'],  errors='coerce')
         
         dane['kwota'] = dane['kwota'].apply(wyczysc_kwote)
         
@@ -174,7 +175,7 @@ def przetworz_csv(uploaded_file):
             pierwszy_pusty = dane[dane['data'].isna()].index[0]
             dane = dane.iloc[:pierwszy_pusty]
 
-        dane['data'] = pd.to_datetime(dane['data'], dayfirst=True, errors='coerce')
+        dane['data'] = pd.to_datetime(dane['data'], errors='coerce')
         dane = dane.dropna(subset=['data'])
         
         dane['kategoria'] = "Bez kategorii"
@@ -202,16 +203,15 @@ if ing:
     selected_banks.append("ING")
 if mbank:
     selected_banks.append("mBank")
-strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Wydatki w czasie", "Wydatki według kategorii"])
+strona = st.sidebar.radio("Idź do:", ["Tabela danych", "Wydatki w czasie", "Wydatki według kategorii", "🔧 Panel Admina"])
+df_filtered_bank = df_full.copy()
 
-if len(selected_banks)>1:
-    df_full=df_full
-elif selected_banks[0]=='ING':
-    df_full = df_full[df_full['opis'].astype(str).str.contains('ing', case=False, na=False)]
-elif selected_banks[0]=='mBank':
-    df_full = df_full[~df_full['opis'].astype(str).str.contains('ing', case=False, na=False)]
-else:
-    df_full=df_full
+# 2. Filtrujemy tylko kopię roboczą
+if len(selected_banks) == 1:
+    if selected_banks[0] == 'ING':
+        df_filtered_bank = df_filtered_bank[df_filtered_bank['opis'].astype(str).str.contains('ing', case=False, na=False)]
+    elif selected_banks[0] == 'mBank':
+        df_filtered_bank = df_filtered_bank[~df_filtered_bank['opis'].astype(str).str.contains('ing', case=False, na=False)]
 
 # ------------------------------------------------------------------
 # STRONA 1: TABELA DANYCH (View, Import, Edit)
@@ -223,30 +223,52 @@ if strona == "Tabela danych":
         uploaded_file = st.file_uploader("Wybierz plik CSV (mBank / ING)", type="csv")
         
         if uploaded_file is not None:
-            st.write("Przetwarzanie...")
-            df_new = przetworz_csv(uploaded_file)
+            file_key = f"csv_data_{uploaded_file.name}"
             
-            if not df_new.empty:
+            if file_key not in st.session_state:
+                st.write("Przetwarzanie pliku...")
+                # Tutaj Twoja funkcja z dodanym seek(0) na początku (dla pewności)
+                df_new = przetworz_csv(uploaded_file)
+                st.session_state[file_key] = df_new
+            
+            # Pobieramy dane z sesji
+            df_to_add = st.session_state[file_key]
+            print (df_to_add.tail(5))
+            
+            if not df_to_add.empty:
                 st.write("Podgląd:")
-                st.dataframe(df_new.head(3))
+                st.dataframe(df_to_add)
                 
+                # Przycisk korzysta teraz z danych w session_state, a nie z pliku
                 if st.button("🔥 Dodaj te transakcje do chmury"):
-                    # 1. Obliczamy ID (brak autoincrement w Sheets)
-                    max_id = df_full['id'].max() if not df_full.empty else 0
-                    if pd.isna(max_id): max_id = 0
-                    
-                    df_new['id'] = range(int(max_id) + 1, int(max_id) + 1 + len(df_new))
-                    
-                    # 2. Łączymy stare dane z nowymi
-                    df_updated = pd.concat([df_full, df_new], ignore_index=True)
-                    
-                    # 3. Zapisujemy całość
-                    zapisz_calosc(df_updated)
-                    
-                    st.success(f"Dodano {len(df_new)} transakcji!")
-                    st.rerun()
+                    try:
+                        # 1. Obliczamy ID
+                        max_id = df_full['id'].max() if not df_full.empty else 0
+                        if pd.isna(max_id): max_id = 0
+                        
+                        # Tworzymy kopię, żeby nie modyfikować oryginału w sesji
+                        df_upload = df_to_add.copy()
+                        df_upload['id'] = range(int(max_id) + 1, int(max_id) + 1 + len(df_upload))
+                        #print(df_upload)
+                        # 2. Łączymy stare dane z nowymi
+                        df_updated = pd.concat([df_full, df_upload], ignore_index=True)
+                        print(df_updated)
+                        # 3. Zapisujemy całość
+                        zapisz_calosc(df_updated)
+                        
+                        st.success(f"Dodano {len(df_upload)} transakcji!")
+                        
+                        # Czyścimy dane z sesji po udanym zapisie, żeby nie dodać ich 2 razy
+                        del st.session_state[file_key]
+                        
+                        # Odświeżamy aplikację
+                        st.rerun()
+                        
+                    except Exception as e:
+                        st.error(f"Wystąpił błąd podczas zapisu: {e}")
+                        st.write(traceback.format_exc()) # Pokaże dokładny błąd
             else:
-                st.error("Błąd odczytu pliku lub plik pusty.")
+                st.error("Plik jest pusty lub format nieznany.")
 
     st.divider()
     st.subheader("📝 Edycja i Przegląd Wydatków")
@@ -276,7 +298,7 @@ if strona == "Tabela danych":
         st.write("")
         st.button("📅 Ten miesiąc", on_click=ustaw_obecny_miesiac)
 
-    df_view = df_full.copy()
+    df_view = df_filtered_bank.copy()
 
     if isinstance(date_range, tuple):
         if len(date_range) == 2:
@@ -329,46 +351,46 @@ if strona == "Tabela danych":
 
     if st.button("💾 Zapisz zmiany w chmurze"):
         try:
-            ids_przed_edycja = set(df_view['id'].tolist())
+            # 1. Identyfikujemy wiersze, które były widoczne w edytorze PRZED edycją
+            # To są ID, które użytkownik MÓGŁ zmienić lub usunąć.
+            ids_in_view_scope = df_view['id'].tolist()
             
-            ids_po_edycji = set(df_edited_result['id'].dropna().tolist()) # dropna bo nowe wiersze nie mają ID
-            ids_usuniete = ids_przed_edycja - ids_po_edycji
-            df_po_usunieciu = df_full[~df_full['id'].isin(ids_usuniete)]
+            # 2. Tworzymy "Tło" - czyli dane, których użytkownik NIE widział
+            # (np. inny bank, inne miesiące, ukryte kategorie). Tych danych NIE WOLNO RUSZAĆ.
+            df_background = df_full[~df_full['id'].isin(ids_in_view_scope)]
             
-            # B. LOGIKA AKTUALIZACJI I DODAWANIA
-            # Teraz musimy zaktualizować wiersze, które zostały w edytorze (mogły być zmienione)
-            # oraz dodać nowe.
+            # 3. Pobieramy to, co użytkownik edytował (wynik z edytora)
+            df_changes = df_edited_result.copy()
             
-            # 1. Oddzielamy wiersze, które edytor nam zwrócił
-            df_to_update = df_edited_result.copy()
-            ids_do_aktualizacji = df_to_update['id'].dropna().tolist()
-            df_baza_bez_edytowanych = df_po_usunieciu[~df_po_usunieciu['id'].isin(ids_do_aktualizacji)]
-            
-            max_id = df_full['id'].max()
+            # 4. Obsługa nowych ID dla nowych wierszy
+            max_id = df_full['id'].max() if not df_full.empty else 0
             if pd.isna(max_id): max_id = 0
             
-            # Reset index do iteracji
-            df_to_update = df_to_update.reset_index(drop=True)
-            
-            for idx, row in df_to_update.iterrows():
+            df_changes = df_changes.reset_index(drop=True)
+            for idx, row in df_changes.iterrows():
                 curr_id = row['id']
-                # Jeśli ID jest puste (NaN) lub 0 -> to nowy wiersz
                 if pd.isna(curr_id) or curr_id == 0:
                     max_id += 1
-                    df_to_update.at[idx, 'id'] = int(max_id)
+                    df_changes.at[idx, 'id'] = int(max_id)
             
-            df_final = pd.concat([df_baza_bez_edytowanych, df_to_update], ignore_index=True)
+            # 5. ŁĄCZENIE: Tło (nienaruszone) + Zmiany (edytowane/nowe)
+            # Jeśli użytkownik usunął wiersz w edytorze, nie ma go w df_changes, 
+            # a skoro był w ids_in_view_scope, to nie ma go też w df_background.
+            # Więc zostanie poprawnie usunięty z całości.
+            df_final = pd.concat([df_background, df_changes], ignore_index=True)
             
+            # Sortowanie dla porządku
             df_final = df_final.sort_values(by='data', ascending=False)
             
+            # Zapisz CAŁOŚĆ
             zapisz_calosc(df_final)
             
-            st.success("✅ Zapisano! (Uwzględniono edycję, dodawanie i usuwanie)")
+            st.success("✅ Zapisano bezpiecznie! (Ukryte dane innych banków/dat zostały zachowane)")
             st.rerun()
             
         except Exception as e:
             st.error(f"Błąd zapisu: {e}")
-            # Pokaż szczegóły błędu do debugowania
+            st.write(traceback.format_exc())
         
 
 # ------------------------------------------------------------------
@@ -380,10 +402,9 @@ elif strona == "Wydatki w czasie":
 
     
     def ustaw_obecny_rok():
-        dzis=datetime.date.today()
-        month_a = dzis-relativedelta(month=12)
-        pierwszy_month=month_a.replace(month=1,day=1)
-        st.session_state['wybrane_daty']=(pierwszy_month,dzis)
+        dzis = datetime.date.today()
+        pierwszy = dzis - relativedelta(years=1)
+        st.session_state['wybrane_daty'] = (pierwszy, dzis)
 
     col_f1, col_f2, col_f3 = st.columns([2, 2, 1])
 
@@ -455,7 +476,7 @@ elif strona == "Wydatki w czasie":
         event = st.altair_chart(
             chart,
             use_container_width=True,
-            on_select="rerun" 
+            on_select="rerun"
         )
 
         # --- 5. ODCZYT DANYCH ---
@@ -698,3 +719,64 @@ elif strona == "Wydatki według kategorii":
                     except Exception as e:
                         st.error(f"Błąd zapisu: {e}")
                         # Pokaż szczegóły błędu do debugowania
+
+# ------------------------------------------------------------------
+# STRONA 4: PANEL ADMINA (DEBUG)
+# ------------------------------------------------------------------
+elif strona == "🔧 Panel Admina":
+    st.title("🔧 Panel Administracyjny")
+    st.warning("⚠️ Tutaj operujesz na żywych danych. Każda zmiana jest zapisywana w Google Sheets!")
+
+    # 1. Statystyki bazy
+    st.subheader("1. Status bazy danych")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Liczba wierszy", len(df_full))
+    col2.metric("Najwyższe ID", df_full['id'].max() if not df_full.empty else 0)
+    col3.metric("Ostatnia data", str(df_full['data'].max().date()) if not df_full.empty else "-")
+
+    # 2. Pełny podgląd
+    st.subheader("2. Pełny podgląd danych (Raw Data)")
+    st.dataframe(df_full, use_container_width=True)
+
+    st.divider()
+
+    # 3. Usuwanie po ID
+    st.subheader("3. Usuwanie wiersza po ID")
+    col_del1, col_del2 = st.columns([1, 2])
+    with col_del1:
+        id_do_usuniecia = st.number_input("Podaj ID do usunięcia", step=1, value=0)
+    
+    with col_del2:
+        st.write("")
+        st.write("")
+        if st.button("🗑️ Usuń ten wiersz trwale"):
+            if id_do_usuniecia in df_full['id'].values:
+                # Filtrujemy, usuwając to ID
+                df_po_usunieciu = df_full[df_full['id'] != id_do_usuniecia]
+                zapisz_calosc(df_po_usunieciu)
+                st.success(f"Usunięto wiersz o ID: {id_do_usuniecia}")
+                st.rerun()
+            else:
+                st.error("Nie znaleziono takiego ID.")
+
+    st.divider()
+
+    # 4. Naprawa struktury (To naprawi Twój problem z ID i datami)
+    st.subheader("4. 🛠️ Naprawa ID i Kolejności")
+    st.info("Ta funkcja posortuje wszystkie transakcje od najstarszej do najnowszej i nada im nowe ID po kolei (1, 2, 3...). Użyj tego, jeśli masz bałagan w numeracji.")
+    
+    if st.button("♻️ Przeindeksuj całą bazę"):
+        try:
+            df_fix = df_full.copy()
+            # Sortujemy chronologicznie
+            df_fix = df_fix.sort_values(by='data', ascending=True)
+            # Nadajemy nowe ID od 1 do N
+            df_fix['id'] = range(1, len(df_fix) + 1)
+            # Sortujemy z powrotem od najnowszej (żeby w tabeli było wygodnie)
+            df_fix = df_fix.sort_values(by='data', ascending=False)
+            
+            zapisz_calosc(df_fix)
+            st.success("Baza naprawiona! ID są teraz po kolei wg dat.")
+            st.rerun()
+        except Exception as e:
+            st.error(f"Błąd: {e}")
